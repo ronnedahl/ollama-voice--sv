@@ -13,6 +13,7 @@ import asyncio
 import base64
 import io
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -48,9 +49,9 @@ app.add_middleware(
 WHISPER_MODEL = "KBLab/kb-whisper-small"  # Swedish-optimized, outperforms whisper-large-v3
 WHISPER_DEVICE = "cuda"
 WHISPER_COMPUTE_TYPE = "float16"
-OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL = "llama3.1:8b"
-PIPER_MODEL = str(Path.home() / ".local/share/piper-voices/sv_SE-nst-medium.onnx")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+PIPER_MODEL = os.getenv("PIPER_MODEL", str(Path.home() / ".local/share/piper-voices/sv_SE-nst-medium.onnx"))
 MAX_AUDIO_SIZE_MB = 10
 
 # VAD Configuration

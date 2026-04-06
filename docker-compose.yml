@@ -1,0 +1,26 @@
+services:
+  backend:
+    build: ./backend
+    container_name: voice-backend
+    network_mode: host
+    environment:
+      - OLLAMA_BASE_URL=http://localhost:11434
+      - OLLAMA_MODEL=llama3.1:8b
+      - PIPER_MODEL=/app/voices/sv_SE-nst-medium.onnx
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: voice-frontend
+    ports:
+      - "3001:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
