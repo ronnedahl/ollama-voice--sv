@@ -1,0 +1,643 @@
+"""
+Local Voice AI Assistant - FastAPI Backend
+
+Endpoints:
+- /api/transcribe: Speech-to-Text (faster-whisper)
+- /api/chat: LLM responses (Ollama)
+- /api/tts: Text-to-Speech (Piper TTS via CLI)
+- /ws/chat: WebSocket for streaming LLM + TTS responses
+- /ws/voice: WebSocket for full voice pipeline with VAD
+"""
+
+import asyncio
+import base64
+import io
+import json
+import re
+import subprocess
+import tempfile
+import wave
+from pathlib import Path
+from typing import Optional
+
+import httpx
+import webrtcvad
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+# Lazy-loaded models
+_whisper_model = None
+
+app = FastAPI(
+    title="Local Voice AI Assistant",
+    description="Lokal Röst-AI Assistent",
+    version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configuration
+WHISPER_MODEL = "KBLab/kb-whisper-small"  # Swedish-optimized, outperforms whisper-large-v3
+WHISPER_DEVICE = "cuda"
+WHISPER_COMPUTE_TYPE = "float16"
+OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_MODEL = "llama3.1:8b"
+PIPER_MODEL = str(Path.home() / ".local/share/piper-voices/sv_SE-nst-medium.onnx")
+MAX_AUDIO_SIZE_MB = 10
+
+# VAD Configuration
+VAD_AGGRESSIVENESS = 2  # 0-3, higher = more aggressive filtering
+VAD_SAMPLE_RATE = 16000  # WebRTC VAD requires 8000, 16000, 32000, or 48000
+VAD_FRAME_DURATION_MS = 30  # 10, 20, or 30 ms
+SILENCE_THRESHOLD_MS = 600  # How long silence before speech is considered ended
+
+
+class ChatRequest(BaseModel):
+    text: str
+    system_prompt: Optional[str] = None
+
+
+class ChatResponse(BaseModel):
+    response: str
+
+
+class TranscribeResponse(BaseModel):
+    text: str
+    language: str
+    confidence: float
+
+
+class TTSRequest(BaseModel):
+    text: str
+
+
+def get_whisper_model():
+    """Lazy-load Whisper model."""
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+
+        print(f"Loading Whisper model '{WHISPER_MODEL}' on {WHISPER_DEVICE}...")
+        _whisper_model = WhisperModel(
+            WHISPER_MODEL,
+            device=WHISPER_DEVICE,
+            compute_type=WHISPER_COMPUTE_TYPE,
+        )
+        print("Whisper model loaded")
+    return _whisper_model
+
+
+def generate_tts_audio(text: str) -> bytes:
+    """Generate TTS audio using Piper TTS CLI."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        output_path = tmp.name
+
+    try:
+        result = subprocess.run(
+            ["piper", "--model", PIPER_MODEL, "--output_file", output_path],
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Piper TTS failed: {result.stderr}")
+
+        with open(output_path, "rb") as f:
+            return f.read()
+    finally:
+        Path(output_path).unlink(missing_ok=True)
+
+
+def split_into_sentences(text: str) -> list[str]:
+    """Split text into sentences for TTS streaming."""
+    # Split on sentence endings, keeping the delimiter
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    return [s.strip() for s in sentences if s.strip()]
+
+
+def transcribe_audio_bytes(audio_bytes: bytes) -> tuple[str, float]:
+    """Transcribe audio bytes directly using Whisper."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+
+    try:
+        model = get_whisper_model()
+        segments, info = model.transcribe(
+            tmp_path,
+            language="sv",
+            beam_size=5,
+            vad_filter=True,
+        )
+
+        text_parts = [segment.text.strip() for segment in segments]
+        full_text = " ".join(text_parts)
+        return full_text, info.language_probability
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+class AudioBuffer:
+    """Buffer for collecting audio chunks and running VAD."""
+
+    def __init__(self):
+        self.vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
+        self.audio_chunks: list[bytes] = []
+        self.sample_rate = VAD_SAMPLE_RATE
+        self.frame_duration_ms = VAD_FRAME_DURATION_MS
+        self.silence_frames = 0
+        self.speech_detected = False
+        self.frames_per_silence_threshold = SILENCE_THRESHOLD_MS // VAD_FRAME_DURATION_MS
+
+    def add_chunk(self, pcm_data: bytes) -> str:
+        """
+        Add PCM audio chunk and check VAD.
+        Returns: 'speech', 'silence', or 'speech_ended'
+        """
+        self.audio_chunks.append(pcm_data)
+
+        # Check if this frame contains speech
+        frame_size = (self.sample_rate * self.frame_duration_ms // 1000) * 2  # 16-bit = 2 bytes
+        if len(pcm_data) >= frame_size:
+            frame = pcm_data[:frame_size]
+            try:
+                is_speech = self.vad.is_speech(frame, self.sample_rate)
+            except Exception:
+                is_speech = True  # Assume speech on error
+
+            if is_speech:
+                self.speech_detected = True
+                self.silence_frames = 0
+                return "speech"
+            else:
+                if self.speech_detected:
+                    self.silence_frames += 1
+                    if self.silence_frames >= self.frames_per_silence_threshold:
+                        return "speech_ended"
+                return "silence"
+
+        return "silence"
+
+    def get_wav_bytes(self) -> bytes:
+        """Convert collected PCM chunks to WAV format."""
+        pcm_data = b"".join(self.audio_chunks)
+
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)  # 16-bit
+            wav_file.setframerate(self.sample_rate)
+            wav_file.writeframes(pcm_data)
+
+        wav_buffer.seek(0)
+        return wav_buffer.read()
+
+    def reset(self):
+        """Reset the buffer for new recording."""
+        self.audio_chunks = []
+        self.silence_frames = 0
+        self.speech_detected = False
+
+
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "service": "Local Voice AI Assistant",
+        "endpoints": ["/api/transcribe", "/api/chat", "/api/tts"],
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "whisper_model": WHISPER_MODEL,
+        "ollama_model": OLLAMA_MODEL,
+        "tts_model": PIPER_MODEL,
+    }
+
+
+@app.post("/api/transcribe", response_model=TranscribeResponse)
+async def transcribe(audio: UploadFile = File(...)):
+    """Transcribe audio to Swedish text using faster-whisper."""
+    contents = await audio.read()
+    size_mb = len(contents) / (1024 * 1024)
+    if size_mb > MAX_AUDIO_SIZE_MB:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Audio file too large. Max {MAX_AUDIO_SIZE_MB}MB",
+        )
+
+    suffix = Path(audio.filename).suffix if audio.filename else ".webm"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(contents)
+        tmp_path = tmp.name
+
+    try:
+        model = get_whisper_model()
+        segments, info = model.transcribe(
+            tmp_path,
+            language="sv",
+            beam_size=5,
+            vad_filter=True,
+        )
+
+        text_parts = [segment.text.strip() for segment in segments]
+        full_text = " ".join(text_parts)
+
+        return TranscribeResponse(
+            text=full_text,
+            language=info.language,
+            confidence=info.language_probability,
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
+
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """Generate AI response using Ollama LLM."""
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    messages = []
+    if request.system_prompt:
+        messages.append({"role": "system", "content": request.system_prompt})
+    else:
+        messages.append({
+            "role": "system",
+            "content": "Du är en hjälpsam svensk AI-assistent. Svara alltid på svenska om inte användaren ber om annat. Var koncis och tydlig.",
+        })
+
+    messages.append({"role": "user", "content": request.text})
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "messages": messages,
+                    "stream": False,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            ai_response = data.get("message", {}).get("content", "")
+            if not ai_response:
+                raise HTTPException(status_code=500, detail="Empty response from Ollama")
+
+            return ChatResponse(response=ai_response)
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=503,
+            detail="Cannot connect to Ollama. Run: ollama serve",
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Ollama request timed out")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"Ollama error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chat failed: {e}")
+
+
+@app.websocket("/ws/chat")
+async def websocket_chat(websocket: WebSocket):
+    """WebSocket endpoint for streaming LLM + TTS responses."""
+    await websocket.accept()
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+
+            if data.get("type") == "chat":
+                text = data.get("text", "").strip()
+                enable_tts = data.get("tts", True)  # TTS enabled by default
+
+                if not text:
+                    await websocket.send_json({"type": "error", "message": "Text cannot be empty"})
+                    continue
+
+                system_prompt = data.get("system_prompt") or "Du är en hjälpsam svensk AI-assistent. Svara alltid på svenska om inte användaren ber om annat. Var koncis och tydlig."
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text},
+                ]
+
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        async with client.stream(
+                            "POST",
+                            f"{OLLAMA_BASE_URL}/api/chat",
+                            json={
+                                "model": OLLAMA_MODEL,
+                                "messages": messages,
+                                "stream": True,
+                            },
+                        ) as response:
+                            full_response = ""
+                            sentence_buffer = ""
+
+                            async for line in response.aiter_lines():
+                                if line:
+                                    chunk = json.loads(line)
+                                    if "message" in chunk:
+                                        token = chunk["message"].get("content", "")
+                                        if token:
+                                            full_response += token
+                                            sentence_buffer += token
+
+                                            # Send token for live text display
+                                            await websocket.send_json({
+                                                "type": "llm_token",
+                                                "token": token,
+                                            })
+
+                                            # Check for sentence boundary and generate TTS
+                                            if enable_tts and re.search(r'[.!?]\s*$', sentence_buffer):
+                                                sentence = sentence_buffer.strip()
+                                                sentence_buffer = ""
+
+                                                if sentence:
+                                                    # Generate TTS in background
+                                                    try:
+                                                        audio_bytes = await asyncio.to_thread(
+                                                            generate_tts_audio, sentence
+                                                        )
+                                                        audio_base64 = base64.b64encode(audio_bytes).decode()
+                                                        await websocket.send_json({
+                                                            "type": "audio_chunk",
+                                                            "audio": audio_base64,
+                                                            "text": sentence,
+                                                        })
+                                                    except Exception as e:
+                                                        await websocket.send_json({
+                                                            "type": "tts_error",
+                                                            "message": str(e),
+                                                        })
+
+                            # Handle any remaining text in buffer
+                            if enable_tts and sentence_buffer.strip():
+                                try:
+                                    audio_bytes = await asyncio.to_thread(
+                                        generate_tts_audio, sentence_buffer.strip()
+                                    )
+                                    audio_base64 = base64.b64encode(audio_bytes).decode()
+                                    await websocket.send_json({
+                                        "type": "audio_chunk",
+                                        "audio": audio_base64,
+                                        "text": sentence_buffer.strip(),
+                                    })
+                                except Exception as e:
+                                    await websocket.send_json({
+                                        "type": "tts_error",
+                                        "message": str(e),
+                                    })
+
+                            await websocket.send_json({
+                                "type": "llm_done",
+                                "full_response": full_response,
+                            })
+
+                except httpx.ConnectError:
+                    await websocket.send_json({"type": "error", "message": "Cannot connect to Ollama"})
+                except Exception as e:
+                    await websocket.send_json({"type": "error", "message": str(e)})
+
+    except WebSocketDisconnect:
+        pass
+
+
+@app.websocket("/ws/voice")
+async def websocket_voice(websocket: WebSocket):
+    """
+    Unified WebSocket endpoint for full voice pipeline with VAD.
+
+    Protocol:
+    - Client sends: {"type": "audio_chunk", "audio": base64_pcm_16khz_mono}
+    - Client sends: {"type": "stop"} to force end recording
+    - Server sends: {"type": "vad_state", "state": "listening"|"speech"|"processing"}
+    - Server sends: {"type": "transcript", "text": "...", "confidence": 0.95}
+    - Server sends: {"type": "llm_token", "token": "..."}
+    - Server sends: {"type": "audio_chunk", "audio": base64_wav, "text": "..."}
+    - Server sends: {"type": "done"}
+    """
+    await websocket.accept()
+    audio_buffer = AudioBuffer()
+
+    async def process_speech():
+        """Process the recorded speech through the full pipeline."""
+        await websocket.send_json({"type": "vad_state", "state": "processing"})
+
+        # Get WAV audio
+        wav_bytes = audio_buffer.get_wav_bytes()
+
+        # Transcribe
+        try:
+            text, confidence = await asyncio.to_thread(transcribe_audio_bytes, wav_bytes)
+        except Exception as e:
+            await websocket.send_json({"type": "error", "message": f"Transcription failed: {e}"})
+            return
+
+        if not text.strip():
+            await websocket.send_json({"type": "error", "message": "Could not hear speech"})
+            await websocket.send_json({"type": "vad_state", "state": "listening"})
+            audio_buffer.reset()
+            return
+
+        await websocket.send_json({
+            "type": "transcript",
+            "text": text,
+            "confidence": confidence,
+        })
+
+        # LLM + TTS streaming
+        system_prompt = "Du är en hjälpsam svensk AI-assistent. Svara alltid på svenska om inte användaren ber om annat. Var koncis och tydlig."
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text},
+        ]
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{OLLAMA_BASE_URL}/api/chat",
+                    json={
+                        "model": OLLAMA_MODEL,
+                        "messages": messages,
+                        "stream": True,
+                    },
+                ) as response:
+                    full_response = ""
+                    sentence_buffer = ""
+
+                    async for line in response.aiter_lines():
+                        if line:
+                            chunk = json.loads(line)
+                            if "message" in chunk:
+                                token = chunk["message"].get("content", "")
+                                if token:
+                                    full_response += token
+                                    sentence_buffer += token
+
+                                    await websocket.send_json({
+                                        "type": "llm_token",
+                                        "token": token,
+                                    })
+
+                                    # Generate TTS for completed sentences
+                                    if re.search(r'[.!?]\s*$', sentence_buffer):
+                                        sentence = sentence_buffer.strip()
+                                        sentence_buffer = ""
+
+                                        if sentence:
+                                            try:
+                                                audio_bytes = await asyncio.to_thread(
+                                                    generate_tts_audio, sentence
+                                                )
+                                                audio_base64 = base64.b64encode(audio_bytes).decode()
+                                                await websocket.send_json({
+                                                    "type": "audio_chunk",
+                                                    "audio": audio_base64,
+                                                    "text": sentence,
+                                                })
+                                            except Exception as e:
+                                                await websocket.send_json({
+                                                    "type": "tts_error",
+                                                    "message": str(e),
+                                                })
+
+                    # Handle remaining text
+                    if sentence_buffer.strip():
+                        try:
+                            audio_bytes = await asyncio.to_thread(
+                                generate_tts_audio, sentence_buffer.strip()
+                            )
+                            audio_base64 = base64.b64encode(audio_bytes).decode()
+                            await websocket.send_json({
+                                "type": "audio_chunk",
+                                "audio": audio_base64,
+                                "text": sentence_buffer.strip(),
+                            })
+                        except Exception:
+                            pass
+
+                    await websocket.send_json({
+                        "type": "llm_done",
+                        "full_response": full_response,
+                    })
+
+        except httpx.ConnectError:
+            await websocket.send_json({"type": "error", "message": "Cannot connect to Ollama"})
+        except Exception as e:
+            await websocket.send_json({"type": "error", "message": str(e)})
+
+        # Reset for next recording
+        audio_buffer.reset()
+        await websocket.send_json({"type": "vad_state", "state": "listening"})
+
+    try:
+        await websocket.send_json({"type": "vad_state", "state": "listening"})
+
+        while True:
+            data = await websocket.receive_json()
+            msg_type = data.get("type")
+
+            if msg_type == "audio_chunk":
+                # Decode base64 PCM audio
+                audio_base64 = data.get("audio", "")
+                if audio_base64:
+                    pcm_data = base64.b64decode(audio_base64)
+                    was_speech_detected = audio_buffer.speech_detected
+                    vad_result = audio_buffer.add_chunk(pcm_data)
+
+                    # Send speech state on first speech detection
+                    if vad_result == "speech" and not was_speech_detected:
+                        await websocket.send_json({"type": "vad_state", "state": "speech"})
+
+                    if vad_result == "speech_ended":
+                        await process_speech()
+
+            elif msg_type == "stop":
+                # Force end recording
+                if audio_buffer.speech_detected:
+                    await process_speech()
+
+    except WebSocketDisconnect:
+        pass
+
+
+@app.post("/api/tts")
+async def text_to_speech(request: TTSRequest):
+    """Convert text to speech using Piper TTS CLI."""
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    # Create temp file for output
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        output_path = tmp.name
+
+    try:
+        # Call piper via CLI: echo "text" | piper --model sv_SE-nst-medium --output_file out.wav
+        result = subprocess.run(
+            [
+                "piper",
+                "--model", PIPER_MODEL,
+                "--output_file", output_path,
+            ],
+            input=request.text,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Piper TTS failed: {result.stderr}",
+            )
+
+        return FileResponse(
+            output_path,
+            media_type="audio/wav",
+            filename="speech.wav",
+            background=None,  # Don't delete until response is sent
+        )
+
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=503,
+            detail="Piper not found. Install with: pipx install piper-tts",
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="TTS timed out")
+    except Exception as e:
+        Path(output_path).unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"TTS failed: {e}")
+
+
+def run_server():
+    """Entry point for uv run serve."""
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+if __name__ == "__main__":
+    run_server()
