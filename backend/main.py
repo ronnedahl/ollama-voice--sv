@@ -28,6 +28,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from music import MusicLibrary, detect_play_command, detect_stop_command
+
 # Lazy-loaded models
 _whisper_model = None
 
@@ -52,7 +54,16 @@ WHISPER_COMPUTE_TYPE = "float16"
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 PIPER_MODEL = os.getenv("PIPER_MODEL", str(Path.home() / ".local/share/piper-voices/sv_SE-nst-medium.onnx"))
+MUSIC_DIR = os.getenv("MUSIC_DIR", str(Path.home() / "Music"))
 MAX_AUDIO_SIZE_MB = 10
+
+# Initialize music library
+music_library = MusicLibrary(MUSIC_DIR)
+
+
+@app.on_event("startup")
+async def startup_event():
+    music_library.scan()
 
 # VAD Configuration
 VAD_AGGRESSIVENESS = 2  # 0-3, higher = more aggressive filtering
@@ -226,6 +237,28 @@ async def health():
         "ollama_model": OLLAMA_MODEL,
         "tts_model": PIPER_MODEL,
     }
+
+
+@app.get("/api/music/list")
+async def list_music():
+    """List all indexed music tracks."""
+    return {"tracks": [t.to_dict() for t in music_library.tracks]}
+
+
+@app.get("/api/music/file/{track_id}")
+async def get_music_file(track_id: str):
+    """Stream a music file by track ID."""
+    track = music_library.get(track_id)
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+    return FileResponse(track.path, filename=track.filename)
+
+
+@app.post("/api/music/rescan")
+async def rescan_music():
+    """Re-scan the music directory."""
+    count = music_library.scan()
+    return {"count": count}
 
 
 @app.post("/api/transcribe", response_model=TranscribeResponse)
@@ -467,6 +500,29 @@ async def websocket_voice(websocket: WebSocket):
             "text": text,
             "confidence": confidence,
         })
+
+        # Check for music commands before invoking LLM
+        if detect_stop_command(text):
+            await websocket.send_json({"type": "stop_music"})
+            audio_buffer.reset()
+            return
+
+        play_query = detect_play_command(text)
+        if play_query:
+            track = music_library.search(play_query)
+            if track:
+                await websocket.send_json({
+                    "type": "play_song",
+                    "track": track.to_dict(),
+                    "url": f"/api/music/file/{track.id}",
+                })
+            else:
+                await websocket.send_json({
+                    "type": "music_not_found",
+                    "query": play_query,
+                })
+            audio_buffer.reset()
+            return
 
         # LLM + TTS streaming
         system_prompt = "Du är en hjälpsam svensk AI-assistent. Svara alltid på svenska om inte användaren ber om annat. Var koncis och tydlig."

@@ -1,7 +1,12 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { createVoiceStream, sendAudioChunk, stopRecording, VadState } from "@/lib/api";
+import { createVoiceStream, sendAudioChunk, stopRecording, VadState, Track } from "@/lib/api";
+
+interface UseVoicePipelineOptions {
+  onPlaySong?: (track: Track, url: string) => void;
+  onStopMusic?: () => void;
+}
 
 export type Status = "idle" | "listening" | "speech" | "processing" | "streaming" | "speaking" | "error";
 
@@ -14,7 +19,7 @@ function base64ToBlob(base64: string): Blob {
   return new Blob([new Uint8Array(byteNumbers)], { type: "audio/wav" });
 }
 
-export function useVoicePipeline() {
+export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
@@ -119,6 +124,21 @@ export function useVoicePipeline() {
         setError(msg);
         setStatus("error");
         stopMicrophone();
+        setAnalyser(null);
+      },
+      onPlaySong: (track, url) => {
+        options.onPlaySong?.(track, url);
+        setStatus("idle");
+        setAnalyser(null);
+      },
+      onStopMusic: () => {
+        options.onStopMusic?.();
+        setStatus("idle");
+        setAnalyser(null);
+      },
+      onMusicNotFound: (query) => {
+        setError(`Hittade inte: ${query}`);
+        setStatus("idle");
         setAnalyser(null);
       },
     });

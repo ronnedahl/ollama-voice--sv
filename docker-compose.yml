@@ -3,10 +3,13 @@ services:
     build: ./backend
     container_name: voice-backend
     network_mode: host
+    volumes:
+      - /mnt/c/Users/smart/Music:/music:ro
     environment:
       - OLLAMA_BASE_URL=http://localhost:11434
       - OLLAMA_MODEL=llama3.1:8b
       - PIPER_MODEL=/app/voices/sv_SE-nst-medium.onnx
+      - MUSIC_DIR=/music
     deploy:
       resources:
         reservations:

@@ -20,6 +20,15 @@ export interface StreamCallbacks {
 
 export type VadState = "listening" | "speech" | "processing";
 
+export interface Track {
+  id: string;
+  filename: string;
+  title: string;
+  artist: string;
+}
+
+export const API_BASE_URL = API_BASE;
+
 export interface VoiceStreamCallbacks {
   onVadState: (state: VadState) => void;
   onTranscript: (text: string, confidence: number) => void;
@@ -27,6 +36,9 @@ export interface VoiceStreamCallbacks {
   onAudioChunk: (audioBase64: string, text: string) => void;
   onDone: (fullResponse: string) => void;
   onError: (error: string) => void;
+  onPlaySong?: (track: Track, url: string) => void;
+  onStopMusic?: () => void;
+  onMusicNotFound?: (query: string) => void;
 }
 
 export function createVoiceStream(callbacks: VoiceStreamCallbacks): WebSocket {
@@ -50,6 +62,15 @@ export function createVoiceStream(callbacks: VoiceStreamCallbacks): WebSocket {
         break;
       case "llm_done":
         callbacks.onDone(data.full_response);
+        break;
+      case "play_song":
+        callbacks.onPlaySong?.(data.track, data.url);
+        break;
+      case "stop_music":
+        callbacks.onStopMusic?.();
+        break;
+      case "music_not_found":
+        callbacks.onMusicNotFound?.(data.query);
         break;
       case "error":
       case "tts_error":
