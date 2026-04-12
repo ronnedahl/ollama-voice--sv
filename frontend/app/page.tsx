@@ -1,8 +1,10 @@
 "use client";
 
 import { useVoicePipeline, Status } from "@/hooks/useVoicePipeline";
+import { useMusicPlayer } from "@/hooks/useMusicPlayer";
 import Waveform from "@/components/Waveform";
 import StatusLabel from "@/components/StatusLabel";
+import NowPlaying from "@/components/NowPlaying";
 
 const statusToValue: Record<Status, string> = {
   idle: "READY",
@@ -15,7 +17,12 @@ const statusToValue: Record<Status, string> = {
 };
 
 export default function Home() {
-  const { status, error, analyser, isRecording, startListening, handleStop } = useVoicePipeline();
+  const music = useMusicPlayer();
+
+  const { status, error, analyser, isRecording, startListening, handleStop } = useVoicePipeline({
+    onPlaySong: (track, url) => music.play(track, url),
+    onStopMusic: () => music.stop(),
+  });
 
   const handleClick = () => {
     if (isRecording) handleStop();
@@ -42,6 +49,14 @@ export default function Home() {
             {status === "idle" ? "TAP TO SPEAK" : statusToValue[status]}
           </p>
         </div>
+
+        {music.currentTrack && (
+          <NowPlaying
+            track={music.currentTrack}
+            isPlaying={music.isPlaying}
+            onStop={music.stop}
+          />
+        )}
 
         {error && (
           <div className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 px-4 py-2 rounded-lg">
