@@ -10,6 +10,10 @@ interface UseVoicePipelineOptions {
 
 export type Status = "idle" | "listening" | "speech" | "processing" | "streaming" | "speaking" | "error";
 
+// Barge-in detection thresholds
+const BARGE_IN_VOLUME_THRESHOLD = 20; // 0-255, higher = less sensitive
+const BARGE_IN_FRAMES_REQUIRED = 4;   // ~65ms at 60fps
+
 function base64ToBlob(base64: string): Blob {
   const byteCharacters = atob(base64);
   const byteNumbers = new Array(byteCharacters.length);
@@ -27,6 +31,8 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const micAnalyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const audioQueueRef = useRef<Blob[]>([]);
   const isPlayingRef = useRef(false);
@@ -34,6 +40,44 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
   const llmDoneRef = useRef(false);
   const playbackCtxRef = useRef<AudioContext | null>(null);
   const playbackAnalyserRef = useRef<AnalyserNode | null>(null);
+  const bargeInRafRef = useRef<number | null>(null);
+  const statusRef = useRef<Status>("idle");
+  const isSendingAudioRef = useRef(false);
+
+  useEffect(() => { statusRef.current = status; }, [status]);
+
+  const stopSendingAudio = useCallback(() => {
+    isSendingAudioRef.current = false;
+  }, []);
+
+  const releaseMicrophone = useCallback(() => {
+    processorRef.current?.disconnect();
+    processorRef.current = null;
+    sourceRef.current?.disconnect();
+    sourceRef.current = null;
+    micAnalyserRef.current?.disconnect();
+    micAnalyserRef.current = null;
+    audioContextRef.current?.close();
+    audioContextRef.current = null;
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+  }, []);
+
+  const stopBargeInMonitor = useCallback(() => {
+    if (bargeInRafRef.current) {
+      cancelAnimationFrame(bargeInRafRef.current);
+      bargeInRafRef.current = null;
+    }
+  }, []);
+
+  const stopPlayback = useCallback(() => {
+    audioQueueRef.current = [];
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+    }
+    isPlayingRef.current = false;
+  }, []);
 
   const playNextAudio = useCallback(() => {
     if (audioQueueRef.current.length === 0) {
@@ -62,7 +106,6 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
     audio.onerror = playNextAudio;
     audioRef.current = audio;
 
-    // Set up playback analyser
     try {
       const ctx = new AudioContext();
       const source = ctx.createMediaElementSource(audio);
@@ -83,19 +126,26 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
     };
   }, [playNextAudio]);
 
-  const stopMicrophone = useCallback(() => {
-    processorRef.current?.disconnect();
-    processorRef.current = null;
-    audioContextRef.current?.close();
-    audioContextRef.current = null;
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-  }, []);
-
   const startListening = useCallback(async () => {
-    setError(null);
-    audioQueueRef.current = [];
+    // Clean up any previous session
+    stopBargeInMonitor();
+    stopPlayback();
     llmDoneRef.current = false;
+    setError(null);
+
+    // Close old WebSocket before creating a new one
+    if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+      wsRef.current.close();
+    }
+
+    const handleBargeIn = () => {
+      console.log("Barge-in triggered");
+      stopBargeInMonitor();
+      stopPlayback();
+      if (wsRef.current) wsRef.current.close();
+      // Restart listening immediately
+      setTimeout(() => startListening(), 50);
+    };
 
     const ws = createVoiceStream({
       onVadState: (state: VadState) => {
@@ -103,8 +153,7 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
         else if (state === "speech") setStatus("speech");
         else if (state === "processing") {
           setStatus("processing");
-          stopMicrophone();
-          setAnalyser(null);
+          stopSendingAudio(); // keep mic alive for barge-in
         }
       },
       onTranscript: () => setStatus("streaming"),
@@ -118,28 +167,32 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
         if (!isPlayingRef.current && audioQueueRef.current.length === 0) {
           setStatus("idle");
           setAnalyser(null);
+          releaseMicrophone();
         }
       },
       onError: (msg) => {
         setError(msg);
         setStatus("error");
-        stopMicrophone();
+        releaseMicrophone();
         setAnalyser(null);
       },
       onPlaySong: (track, url) => {
         options.onPlaySong?.(track, url);
         setStatus("idle");
         setAnalyser(null);
+        releaseMicrophone();
       },
       onStopMusic: () => {
         options.onStopMusic?.();
         setStatus("idle");
         setAnalyser(null);
+        releaseMicrophone();
       },
       onMusicNotFound: (query) => {
         setError(`Hittade inte: ${query}`);
         setStatus("idle");
         setAnalyser(null);
+        releaseMicrophone();
       },
     });
 
@@ -150,28 +203,39 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
     });
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
-      });
-      streamRef.current = stream;
+      // Reuse existing mic if available, otherwise request new one
+      let ctx = audioContextRef.current;
+      let stream = streamRef.current;
 
-      const ctx = new AudioContext();
-      audioContextRef.current = ctx;
+      if (!stream || !ctx) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        streamRef.current = stream;
+        ctx = new AudioContext();
+        audioContextRef.current = ctx;
+
+        const source = ctx.createMediaStreamSource(stream);
+        sourceRef.current = source;
+
+        const micAnalyser = ctx.createAnalyser();
+        micAnalyser.fftSize = 128;
+        source.connect(micAnalyser);
+        micAnalyserRef.current = micAnalyser;
+      }
+
       const inputRate = ctx.sampleRate;
       const targetRate = 16000;
 
-      const source = ctx.createMediaStreamSource(stream);
-
-      // Set up mic analyser for visualization
-      const micAnalyser = ctx.createAnalyser();
-      micAnalyser.fftSize = 128;
-      source.connect(micAnalyser);
-      setAnalyser(micAnalyser);
+      setAnalyser(micAnalyserRef.current);
 
       const processor = ctx.createScriptProcessor(4096, 1, 1);
       processorRef.current = processor;
 
+      isSendingAudioRef.current = true;
+
       processor.onaudioprocess = (e) => {
+        if (!isSendingAudioRef.current) return;
         if (ws.readyState !== WebSocket.OPEN) return;
         const input = e.inputBuffer.getChannelData(0);
 
@@ -193,19 +257,65 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
         sendAudioChunk(ws, int16.buffer);
       };
 
-      source.connect(processor);
+      sourceRef.current!.connect(processor);
       processor.connect(ctx.destination);
       setStatus("listening");
+
+      // Start barge-in monitor loop
+      const dataArray = new Uint8Array(micAnalyserRef.current!.frequencyBinCount);
+      let loudFrames = 0;
+
+      let logCounter = 0;
+      const monitor = () => {
+        const an = micAnalyserRef.current;
+        if (!an) return;
+
+        // Only monitor during playback
+        if (statusRef.current === "speaking" || statusRef.current === "streaming") {
+          an.getByteFrequencyData(dataArray);
+          let sum = 0;
+          for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+          const avg = sum / dataArray.length;
+
+          // Debug log every 30 frames (~0.5s)
+          if (++logCounter % 30 === 0) {
+            console.log(`[barge-in] status=${statusRef.current} vol=${avg.toFixed(1)} threshold=${BARGE_IN_VOLUME_THRESHOLD} loudFrames=${loudFrames}`);
+          }
+
+          if (avg > BARGE_IN_VOLUME_THRESHOLD) {
+            loudFrames++;
+            if (loudFrames >= BARGE_IN_FRAMES_REQUIRED) {
+              console.log("[barge-in] TRIGGERED");
+              handleBargeIn();
+              return;
+            }
+          } else {
+            loudFrames = 0;
+          }
+        } else {
+          loudFrames = 0;
+        }
+
+        bargeInRafRef.current = requestAnimationFrame(monitor);
+      };
+      bargeInRafRef.current = requestAnimationFrame(monitor);
     } catch {
       setError("Kunde inte komma åt mikrofonen.");
       setStatus("error");
       ws.close();
     }
-  }, [stopMicrophone, playNextAudio]);
+  }, [stopSendingAudio, releaseMicrophone, stopBargeInMonitor, stopPlayback, playNextAudio, options]);
 
   const handleStop = useCallback(() => {
     if (wsRef.current) stopRecording(wsRef.current);
   }, []);
+
+  useEffect(() => {
+    return () => {
+      stopBargeInMonitor();
+      releaseMicrophone();
+    };
+  }, [stopBargeInMonitor, releaseMicrophone]);
 
   const isActive = status !== "idle" && status !== "error";
   const isRecording = status === "listening" || status === "speech";
