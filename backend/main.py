@@ -48,14 +48,21 @@ app.add_middleware(
 )
 
 # Configuration
-WHISPER_MODEL = "KBLab/kb-whisper-small"  # Swedish-optimized, outperforms whisper-large-v3
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "KBLab/kb-whisper-small")
 WHISPER_DEVICE = "cuda"
 WHISPER_COMPUTE_TYPE = "float16"
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 PIPER_MODEL = os.getenv("PIPER_MODEL", str(Path.home() / ".local/share/piper-voices/sv_SE-nst-medium.onnx"))
+LANGUAGE = os.getenv("LANGUAGE", "sv")
 MUSIC_DIR = os.getenv("MUSIC_DIR", str(Path.home() / "Music"))
 MAX_AUDIO_SIZE_MB = 10
+
+SYSTEM_PROMPTS = {
+    "sv": "Du är en hjälpsam svensk AI-assistent. Svara alltid på svenska om inte användaren ber om annat. Var koncis och tydlig.",
+    "en": "You are a helpful AI assistant. Always respond in English. Be concise and clear.",
+}
+SYSTEM_PROMPT = SYSTEM_PROMPTS.get(LANGUAGE, SYSTEM_PROMPTS["sv"])
 
 # Initialize music library
 music_library = MusicLibrary(MUSIC_DIR)
@@ -107,15 +114,39 @@ def get_whisper_model():
     return _whisper_model
 
 
+def clean_text_for_tts(text: str) -> str:
+    """Strip markdown and other characters that TTS would read literally."""
+    # Remove code blocks
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    # Remove inline code
+    text = re.sub(r"`([^`]*)`", r"\1", text)
+    # Remove bold/italic markers (**, *, __, _)
+    text = re.sub(r"\*+", "", text)
+    text = re.sub(r"_+", "", text)
+    # Remove markdown headers (# at start of line)
+    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+    # Remove list bullets at start of line (-, +, *)
+    text = re.sub(r"^\s*[-+*]\s+", "", text, flags=re.MULTILINE)
+    # Remove link syntax [text](url) → text
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    # Collapse multiple whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def generate_tts_audio(text: str) -> bytes:
     """Generate TTS audio using Piper TTS CLI."""
+    cleaned = clean_text_for_tts(text)
+    if not cleaned:
+        return b""
+
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         output_path = tmp.name
 
     try:
         result = subprocess.run(
             ["piper", "--model", PIPER_MODEL, "--output_file", output_path],
-            input=text,
+            input=cleaned,
             capture_output=True,
             text=True,
             timeout=30,
@@ -146,7 +177,7 @@ def transcribe_audio_bytes(audio_bytes: bytes) -> tuple[str, float]:
         model = get_whisper_model()
         segments, info = model.transcribe(
             tmp_path,
-            language="sv",
+            language=LANGUAGE,
             beam_size=5,
             vad_filter=True,
         )
@@ -281,7 +312,7 @@ async def transcribe(audio: UploadFile = File(...)):
         model = get_whisper_model()
         segments, info = model.transcribe(
             tmp_path,
-            language="sv",
+            language=LANGUAGE,
             beam_size=5,
             vad_filter=True,
         )
@@ -314,7 +345,7 @@ async def chat(request: ChatRequest):
     else:
         messages.append({
             "role": "system",
-            "content": "Du är en hjälpsam svensk AI-assistent. Svara alltid på svenska om inte användaren ber om annat. Var koncis och tydlig.",
+            "content": SYSTEM_PROMPT,
         })
 
     messages.append({"role": "user", "content": request.text})
@@ -368,7 +399,7 @@ async def websocket_chat(websocket: WebSocket):
                     await websocket.send_json({"type": "error", "message": "Text cannot be empty"})
                     continue
 
-                system_prompt = data.get("system_prompt") or "Du är en hjälpsam svensk AI-assistent. Svara alltid på svenska om inte användaren ber om annat. Var koncis och tydlig."
+                system_prompt = data.get("system_prompt") or SYSTEM_PROMPT
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text},
@@ -525,7 +556,7 @@ async def websocket_voice(websocket: WebSocket):
             return
 
         # LLM + TTS streaming
-        system_prompt = "Du är en hjälpsam svensk AI-assistent. Svara alltid på svenska om inte användaren ber om annat. Var koncis och tydlig."
+        system_prompt = SYSTEM_PROMPT
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": text},
@@ -602,13 +633,24 @@ async def websocket_voice(websocket: WebSocket):
                     })
 
         except httpx.ConnectError:
-            await websocket.send_json({"type": "error", "message": "Cannot connect to Ollama"})
+            try:
+                await websocket.send_json({"type": "error", "message": "Cannot connect to Ollama"})
+            except RuntimeError:
+                return  # Client disconnected (barge-in)
+        except WebSocketDisconnect:
+            return
         except Exception as e:
-            await websocket.send_json({"type": "error", "message": str(e)})
+            try:
+                await websocket.send_json({"type": "error", "message": str(e)})
+            except RuntimeError:
+                return
 
         # Reset for next recording
         audio_buffer.reset()
-        await websocket.send_json({"type": "vad_state", "state": "listening"})
+        try:
+            await websocket.send_json({"type": "vad_state", "state": "listening"})
+        except RuntimeError:
+            pass
 
     try:
         await websocket.send_json({"type": "vad_state", "state": "listening"})

@@ -79,12 +79,19 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
     isPlayingRef.current = false;
   }, []);
 
+  const resumeListening = useCallback(() => {
+    isSendingAudioRef.current = true;
+    llmDoneRef.current = false;
+    setStatus("listening");
+    if (micAnalyserRef.current) setAnalyser(micAnalyserRef.current);
+  }, []);
+
   const playNextAudio = useCallback(() => {
     if (audioQueueRef.current.length === 0) {
       isPlayingRef.current = false;
       if (llmDoneRef.current) {
-        setStatus("idle");
-        setAnalyser(null);
+        // Always-on mode: go back to listening instead of idle
+        resumeListening();
       }
       return;
     }
@@ -97,7 +104,7 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
       audioRef.current.src = url;
       audioRef.current.play().catch(console.error);
     }
-  }, []);
+  }, [resumeListening]);
 
   useEffect(() => {
     const audio = new Audio();
@@ -149,9 +156,14 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
 
     const ws = createVoiceStream({
       onVadState: (state: VadState) => {
-        if (state === "listening") setStatus("listening");
-        else if (state === "speech") setStatus("speech");
-        else if (state === "processing") {
+        // Ignore backend's vad_state "listening" while we're still speaking/streaming -
+        // frontend decides when to resume listening (via playNextAudio).
+        if (state === "listening") {
+          if (statusRef.current === "speaking" || statusRef.current === "streaming") return;
+          resumeListening();
+        } else if (state === "speech") {
+          setStatus("speech");
+        } else if (state === "processing") {
           setStatus("processing");
           stopSendingAudio(); // keep mic alive for barge-in
         }
@@ -165,9 +177,7 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
       onDone: () => {
         llmDoneRef.current = true;
         if (!isPlayingRef.current && audioQueueRef.current.length === 0) {
-          setStatus("idle");
-          setAnalyser(null);
-          releaseMicrophone();
+          resumeListening();
         }
       },
       onError: (msg) => {
@@ -178,21 +188,15 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
       },
       onPlaySong: (track, url) => {
         options.onPlaySong?.(track, url);
-        setStatus("idle");
-        setAnalyser(null);
-        releaseMicrophone();
+        resumeListening();
       },
       onStopMusic: () => {
         options.onStopMusic?.();
-        setStatus("idle");
-        setAnalyser(null);
-        releaseMicrophone();
+        resumeListening();
       },
       onMusicNotFound: (query) => {
         setError(`Hittade inte: ${query}`);
-        setStatus("idle");
-        setAnalyser(null);
-        releaseMicrophone();
+        resumeListening();
       },
     });
 
