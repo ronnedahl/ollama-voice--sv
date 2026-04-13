@@ -33,7 +33,7 @@ export default function Home() {
     <main className="relative h-dvh w-full overflow-hidden flex flex-col">
       {/* Top labels */}
       <header className="flex justify-between items-start px-6 md:px-10 pt-6 md:pt-10">
-        <StatusLabel label="Speech Language" value="Svenska" />
+        <StatusLabel label="Speech Language" value="English" />
         <StatusLabel label="Status" value={statusToValue[status]} align="right" />
       </header>
 

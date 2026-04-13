@@ -23,12 +23,16 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --no-dev
 
-# Download Piper TTS Swedish voice model
+# Download Piper TTS voice models (Swedish + English)
 RUN mkdir -p /app/voices && \
     curl -L -o /app/voices/sv_SE-nst-medium.onnx \
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/sv/sv_SE/nst/medium/sv_SE-nst-medium.onnx" && \
     curl -L -o /app/voices/sv_SE-nst-medium.onnx.json \
-    "https://huggingface.co/rhasspy/piper-voices/resolve/main/sv/sv_SE/nst/medium/sv_SE-nst-medium.onnx.json"
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/sv/sv_SE/nst/medium/sv_SE-nst-medium.onnx.json" && \
+    curl -L -o /app/voices/en_US-amy-medium.onnx \
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx" && \
+    curl -L -o /app/voices/en_US-amy-medium.onnx.json \
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json"
 
 # Copy application code
 COPY main.py music.py ./
