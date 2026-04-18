@@ -73,7 +73,7 @@ async def startup_event():
     music_library.scan()
 
 # VAD Configuration
-VAD_AGGRESSIVENESS = 2  # 0-3, higher = more aggressive filtering
+VAD_AGGRESSIVENESS = 3  # 0-3, higher = more aggressive filtering
 VAD_SAMPLE_RATE = 16000  # WebRTC VAD requires 8000, 16000, 32000, or 48000
 VAD_FRAME_DURATION_MS = 30  # 10, 20, or 30 ms
 SILENCE_THRESHOLD_MS = 600  # How long silence before speech is considered ended
@@ -114,30 +114,11 @@ def get_whisper_model():
     return _whisper_model
 
 
-def clean_text_for_tts(text: str) -> str:
-    """Strip markdown and other characters that TTS would read literally."""
-    # Remove code blocks
-    text = re.sub(r"```[\s\S]*?```", "", text)
-    # Remove inline code
-    text = re.sub(r"`([^`]*)`", r"\1", text)
-    # Remove bold/italic markers (**, *, __, _)
-    text = re.sub(r"\*+", "", text)
-    text = re.sub(r"_+", "", text)
-    # Remove markdown headers (# at start of line)
-    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
-    # Remove list bullets at start of line (-, +, *)
-    text = re.sub(r"^\s*[-+*]\s+", "", text, flags=re.MULTILINE)
-    # Remove link syntax [text](url) → text
-    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-    # Collapse multiple whitespace
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
 def generate_tts_audio(text: str) -> bytes:
     """Generate TTS audio using Piper TTS CLI."""
-    cleaned = clean_text_for_tts(text)
-    if not cleaned:
+    # Piper crashes with "# channels not specified" if input produces no audio
+    # (e.g. only punctuation or whitespace). Skip those cases.
+    if not re.search(r'\w', text):
         return b""
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -146,7 +127,7 @@ def generate_tts_audio(text: str) -> bytes:
     try:
         result = subprocess.run(
             ["piper", "--model", PIPER_MODEL, "--output_file", output_path],
-            input=cleaned,
+            input=text,
             capture_output=True,
             text=True,
             timeout=30,
@@ -506,6 +487,17 @@ async def websocket_voice(websocket: WebSocket):
     await websocket.accept()
     audio_buffer = AudioBuffer()
 
+    # Keepalive ping every 30 seconds to prevent timeout
+    async def keepalive():
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await websocket.send_json({"type": "ping"})
+            except Exception:
+                break
+
+    keepalive_task = asyncio.create_task(keepalive())
+
     async def process_speech():
         """Process the recorded speech through the full pipeline."""
         await websocket.send_json({"type": "vad_state", "state": "processing"})
@@ -521,9 +513,8 @@ async def websocket_voice(websocket: WebSocket):
             return
 
         if not text.strip():
-            await websocket.send_json({"type": "error", "message": "Could not hear speech"})
-            await websocket.send_json({"type": "vad_state", "state": "listening"})
             audio_buffer.reset()
+            await websocket.send_json({"type": "vad_state", "state": "listening"})
             return
 
         await websocket.send_json({
@@ -681,6 +672,8 @@ async def websocket_voice(websocket: WebSocket):
 
     except WebSocketDisconnect:
         pass
+    finally:
+        keepalive_task.cancel()
 
 
 @app.post("/api/tts")
