@@ -43,6 +43,7 @@ from config import (
 )
 from music import MusicLibrary, detect_play_command, detect_stop_command
 from schemas import ChatRequest, ChatResponse, TranscribeResponse, TTSRequest
+from services.tts import generate_tts_audio
 
 # Lazy-loaded models
 _whisper_model = None
@@ -84,33 +85,6 @@ def get_whisper_model():
         )
         print("Whisper model loaded")
     return _whisper_model
-
-
-def generate_tts_audio(text: str) -> bytes:
-    """Generate TTS audio using Piper TTS CLI."""
-    # Piper crashes with "# channels not specified" if input produces no audio
-    # (e.g. only punctuation or whitespace). Skip those cases.
-    if not re.search(r'\w', text):
-        return b""
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        output_path = tmp.name
-
-    try:
-        result = subprocess.run(
-            ["piper", "--model", PIPER_MODEL, "--output_file", output_path],
-            input=text,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Piper TTS failed: {result.stderr}")
-
-        with open(output_path, "rb") as f:
-            return f.read()
-    finally:
-        Path(output_path).unlink(missing_ok=True)
 
 
 def split_into_sentences(text: str) -> list[str]:
