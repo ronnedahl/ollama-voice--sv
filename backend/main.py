@@ -12,30 +12,23 @@ Endpoints:
 import asyncio
 import base64
 import re
-import subprocess
-import tempfile
-from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 
-from config import (
-    LANGUAGE,
-    MAX_AUDIO_SIZE_MB,
-    MUSIC_DIR,
-    OLLAMA_MODEL,
-    PIPER_MODEL,
-    SYSTEM_PROMPT,
-    WHISPER_MODEL,
-)
-from music import MusicLibrary, detect_play_command, detect_stop_command
-from schemas import ChatRequest, ChatResponse, TranscribeResponse, TTSRequest
+from config import SYSTEM_PROMPT
+from music import detect_play_command, detect_stop_command
+from routes import chat as chat_route
+from routes import health as health_route
+from routes import music as music_route
+from routes import transcribe as transcribe_route
+from routes import tts as tts_route
 from services import ollama
 from services.tts import generate_tts_audio
 from services.vad import AudioBuffer
-from services.whisper import get_whisper_model, transcribe_audio_bytes
+from services.whisper import transcribe_audio_bytes
+from state import music_library
 
 app = FastAPI(
     title="Local Voice AI Assistant",
@@ -51,138 +44,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize music library
-music_library = MusicLibrary(MUSIC_DIR)
+app.include_router(health_route.router)
+app.include_router(music_route.router)
+app.include_router(transcribe_route.router)
+app.include_router(chat_route.router)
+app.include_router(tts_route.router)
 
 
 @app.on_event("startup")
 async def startup_event():
     music_library.scan()
-
-
-def split_into_sentences(text: str) -> list[str]:
-    """Split text into sentences for TTS streaming."""
-    # Split on sentence endings, keeping the delimiter
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    return [s.strip() for s in sentences if s.strip()]
-
-
-@app.get("/")
-async def root():
-    return {
-        "status": "ok",
-        "service": "Local Voice AI Assistant",
-        "endpoints": ["/api/transcribe", "/api/chat", "/api/tts"],
-    }
-
-
-@app.get("/health")
-async def health():
-    return {
-        "status": "healthy",
-        "whisper_model": WHISPER_MODEL,
-        "ollama_model": OLLAMA_MODEL,
-        "tts_model": PIPER_MODEL,
-    }
-
-
-@app.get("/api/music/list")
-async def list_music():
-    """List all indexed music tracks."""
-    return {"tracks": [t.to_dict() for t in music_library.tracks]}
-
-
-@app.get("/api/music/file/{track_id}")
-async def get_music_file(track_id: str):
-    """Stream a music file by track ID."""
-    track = music_library.get(track_id)
-    if not track:
-        raise HTTPException(status_code=404, detail="Track not found")
-    return FileResponse(track.path, filename=track.filename)
-
-
-@app.post("/api/music/rescan")
-async def rescan_music():
-    """Re-scan the music directory."""
-    count = music_library.scan()
-    return {"count": count}
-
-
-@app.post("/api/transcribe", response_model=TranscribeResponse)
-async def transcribe(audio: UploadFile = File(...)):
-    """Transcribe audio to Swedish text using faster-whisper."""
-    contents = await audio.read()
-    size_mb = len(contents) / (1024 * 1024)
-    if size_mb > MAX_AUDIO_SIZE_MB:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Audio file too large. Max {MAX_AUDIO_SIZE_MB}MB",
-        )
-
-    suffix = Path(audio.filename).suffix if audio.filename else ".webm"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(contents)
-        tmp_path = tmp.name
-
-    try:
-        model = get_whisper_model()
-        segments, info = model.transcribe(
-            tmp_path,
-            language=LANGUAGE,
-            beam_size=5,
-            vad_filter=True,
-        )
-
-        text_parts = [segment.text.strip() for segment in segments]
-        full_text = " ".join(text_parts)
-
-        return TranscribeResponse(
-            text=full_text,
-            language=info.language,
-            confidence=info.language_probability,
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
-
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
-
-
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    """Generate AI response using Ollama LLM."""
-    if not request.text.strip():
-        raise HTTPException(status_code=400, detail="Text cannot be empty")
-
-    messages = []
-    if request.system_prompt:
-        messages.append({"role": "system", "content": request.system_prompt})
-    else:
-        messages.append({
-            "role": "system",
-            "content": SYSTEM_PROMPT,
-        })
-
-    messages.append({"role": "user", "content": request.text})
-
-    try:
-        ai_response = await ollama.chat(messages)
-        if not ai_response:
-            raise HTTPException(status_code=500, detail="Empty response from Ollama")
-        return ChatResponse(response=ai_response)
-
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=503,
-            detail="Cannot connect to Ollama. Run: ollama serve",
-        )
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Ollama request timed out")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=f"Ollama error: {e.response.text}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Chat failed: {e}")
 
 
 @app.websocket("/ws/chat")
@@ -465,55 +336,6 @@ async def websocket_voice(websocket: WebSocket):
         pass
     finally:
         keepalive_task.cancel()
-
-
-@app.post("/api/tts")
-async def text_to_speech(request: TTSRequest):
-    """Convert text to speech using Piper TTS CLI."""
-    if not request.text.strip():
-        raise HTTPException(status_code=400, detail="Text cannot be empty")
-
-    # Create temp file for output
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        output_path = tmp.name
-
-    try:
-        # Call piper via CLI: echo "text" | piper --model sv_SE-nst-medium --output_file out.wav
-        result = subprocess.run(
-            [
-                "piper",
-                "--model", PIPER_MODEL,
-                "--output_file", output_path,
-            ],
-            input=request.text,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-        if result.returncode != 0:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Piper TTS failed: {result.stderr}",
-            )
-
-        return FileResponse(
-            output_path,
-            media_type="audio/wav",
-            filename="speech.wav",
-            background=None,  # Don't delete until response is sent
-        )
-
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=503,
-            detail="Piper not found. Install with: pipx install piper-tts",
-        )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="TTS timed out")
-    except Exception as e:
-        Path(output_path).unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"TTS failed: {e}")
 
 
 def run_server():
