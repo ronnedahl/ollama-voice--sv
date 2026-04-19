@@ -18,14 +18,12 @@ import subprocess
 import tempfile
 import wave
 from pathlib import Path
-from typing import Optional
 
 import httpx
 import webrtcvad
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
 
 from config import (
     LANGUAGE,
@@ -44,6 +42,7 @@ from config import (
     WHISPER_MODEL,
 )
 from music import MusicLibrary, detect_play_command, detect_stop_command
+from schemas import ChatRequest, ChatResponse, TranscribeResponse, TTSRequest
 
 # Lazy-loaded models
 _whisper_model = None
@@ -69,25 +68,6 @@ music_library = MusicLibrary(MUSIC_DIR)
 @app.on_event("startup")
 async def startup_event():
     music_library.scan()
-
-
-class ChatRequest(BaseModel):
-    text: str
-    system_prompt: Optional[str] = None
-
-
-class ChatResponse(BaseModel):
-    response: str
-
-
-class TranscribeResponse(BaseModel):
-    text: str
-    language: str
-    confidence: float
-
-
-class TTSRequest(BaseModel):
-    text: str
 
 
 def get_whisper_model():
