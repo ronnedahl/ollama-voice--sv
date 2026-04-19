@@ -11,16 +11,13 @@ Endpoints:
 
 import asyncio
 import base64
-import io
 import json
 import re
 import subprocess
 import tempfile
-import wave
 from pathlib import Path
 
 import httpx
-import webrtcvad
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -32,16 +29,13 @@ from config import (
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
     PIPER_MODEL,
-    SILENCE_THRESHOLD_MS,
     SYSTEM_PROMPT,
-    VAD_AGGRESSIVENESS,
-    VAD_FRAME_DURATION_MS,
-    VAD_SAMPLE_RATE,
     WHISPER_MODEL,
 )
 from music import MusicLibrary, detect_play_command, detect_stop_command
 from schemas import ChatRequest, ChatResponse, TranscribeResponse, TTSRequest
 from services.tts import generate_tts_audio
+from services.vad import AudioBuffer
 from services.whisper import get_whisper_model, transcribe_audio_bytes
 
 app = FastAPI(
@@ -72,68 +66,6 @@ def split_into_sentences(text: str) -> list[str]:
     # Split on sentence endings, keeping the delimiter
     sentences = re.split(r'(?<=[.!?])\s+', text)
     return [s.strip() for s in sentences if s.strip()]
-
-
-class AudioBuffer:
-    """Buffer for collecting audio chunks and running VAD."""
-
-    def __init__(self):
-        self.vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
-        self.audio_chunks: list[bytes] = []
-        self.sample_rate = VAD_SAMPLE_RATE
-        self.frame_duration_ms = VAD_FRAME_DURATION_MS
-        self.silence_frames = 0
-        self.speech_detected = False
-        self.frames_per_silence_threshold = SILENCE_THRESHOLD_MS // VAD_FRAME_DURATION_MS
-
-    def add_chunk(self, pcm_data: bytes) -> str:
-        """
-        Add PCM audio chunk and check VAD.
-        Returns: 'speech', 'silence', or 'speech_ended'
-        """
-        self.audio_chunks.append(pcm_data)
-
-        # Check if this frame contains speech
-        frame_size = (self.sample_rate * self.frame_duration_ms // 1000) * 2  # 16-bit = 2 bytes
-        if len(pcm_data) >= frame_size:
-            frame = pcm_data[:frame_size]
-            try:
-                is_speech = self.vad.is_speech(frame, self.sample_rate)
-            except Exception:
-                is_speech = True  # Assume speech on error
-
-            if is_speech:
-                self.speech_detected = True
-                self.silence_frames = 0
-                return "speech"
-            else:
-                if self.speech_detected:
-                    self.silence_frames += 1
-                    if self.silence_frames >= self.frames_per_silence_threshold:
-                        return "speech_ended"
-                return "silence"
-
-        return "silence"
-
-    def get_wav_bytes(self) -> bytes:
-        """Convert collected PCM chunks to WAV format."""
-        pcm_data = b"".join(self.audio_chunks)
-
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, "wb") as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)  # 16-bit
-            wav_file.setframerate(self.sample_rate)
-            wav_file.writeframes(pcm_data)
-
-        wav_buffer.seek(0)
-        return wav_buffer.read()
-
-    def reset(self):
-        """Reset the buffer for new recording."""
-        self.audio_chunks = []
-        self.silence_frames = 0
-        self.speech_detected = False
 
 
 @app.get("/")
