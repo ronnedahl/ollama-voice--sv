@@ -11,7 +11,6 @@ Endpoints:
 
 import asyncio
 import base64
-import json
 import re
 import subprocess
 import tempfile
@@ -26,7 +25,6 @@ from config import (
     LANGUAGE,
     MAX_AUDIO_SIZE_MB,
     MUSIC_DIR,
-    OLLAMA_BASE_URL,
     OLLAMA_MODEL,
     PIPER_MODEL,
     SYSTEM_PROMPT,
@@ -34,6 +32,7 @@ from config import (
 )
 from music import MusicLibrary, detect_play_command, detect_stop_command
 from schemas import ChatRequest, ChatResponse, TranscribeResponse, TTSRequest
+from services import ollama
 from services.tts import generate_tts_audio
 from services.vad import AudioBuffer
 from services.whisper import get_whisper_model, transcribe_audio_bytes
@@ -168,23 +167,10 @@ async def chat(request: ChatRequest):
     messages.append({"role": "user", "content": request.text})
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{OLLAMA_BASE_URL}/api/chat",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "messages": messages,
-                    "stream": False,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            ai_response = data.get("message", {}).get("content", "")
-            if not ai_response:
-                raise HTTPException(status_code=500, detail="Empty response from Ollama")
-
-            return ChatResponse(response=ai_response)
+        ai_response = await ollama.chat(messages)
+        if not ai_response:
+            raise HTTPException(status_code=500, detail="Empty response from Ollama")
+        return ChatResponse(response=ai_response)
 
     except httpx.ConnectError:
         raise HTTPException(
@@ -223,68 +209,34 @@ async def websocket_chat(websocket: WebSocket):
                 ]
 
                 try:
-                    async with httpx.AsyncClient(timeout=60.0) as client:
-                        async with client.stream(
-                            "POST",
-                            f"{OLLAMA_BASE_URL}/api/chat",
-                            json={
-                                "model": OLLAMA_MODEL,
-                                "messages": messages,
-                                "stream": True,
-                            },
-                        ) as response:
-                            full_response = ""
+                    full_response = ""
+                    sentence_buffer = ""
+
+                    async for token in ollama.stream_chat(messages):
+                        full_response += token
+                        sentence_buffer += token
+
+                        # Send token for live text display
+                        await websocket.send_json({
+                            "type": "llm_token",
+                            "token": token,
+                        })
+
+                        # Check for sentence boundary and generate TTS
+                        if enable_tts and re.search(r'[.!?]\s*$', sentence_buffer):
+                            sentence = sentence_buffer.strip()
                             sentence_buffer = ""
 
-                            async for line in response.aiter_lines():
-                                if line:
-                                    chunk = json.loads(line)
-                                    if "message" in chunk:
-                                        token = chunk["message"].get("content", "")
-                                        if token:
-                                            full_response += token
-                                            sentence_buffer += token
-
-                                            # Send token for live text display
-                                            await websocket.send_json({
-                                                "type": "llm_token",
-                                                "token": token,
-                                            })
-
-                                            # Check for sentence boundary and generate TTS
-                                            if enable_tts and re.search(r'[.!?]\s*$', sentence_buffer):
-                                                sentence = sentence_buffer.strip()
-                                                sentence_buffer = ""
-
-                                                if sentence:
-                                                    # Generate TTS in background
-                                                    try:
-                                                        audio_bytes = await asyncio.to_thread(
-                                                            generate_tts_audio, sentence
-                                                        )
-                                                        audio_base64 = base64.b64encode(audio_bytes).decode()
-                                                        await websocket.send_json({
-                                                            "type": "audio_chunk",
-                                                            "audio": audio_base64,
-                                                            "text": sentence,
-                                                        })
-                                                    except Exception as e:
-                                                        await websocket.send_json({
-                                                            "type": "tts_error",
-                                                            "message": str(e),
-                                                        })
-
-                            # Handle any remaining text in buffer
-                            if enable_tts and sentence_buffer.strip():
+                            if sentence:
                                 try:
                                     audio_bytes = await asyncio.to_thread(
-                                        generate_tts_audio, sentence_buffer.strip()
+                                        generate_tts_audio, sentence
                                     )
                                     audio_base64 = base64.b64encode(audio_bytes).decode()
                                     await websocket.send_json({
                                         "type": "audio_chunk",
                                         "audio": audio_base64,
-                                        "text": sentence_buffer.strip(),
+                                        "text": sentence,
                                     })
                                 except Exception as e:
                                     await websocket.send_json({
@@ -292,10 +244,28 @@ async def websocket_chat(websocket: WebSocket):
                                         "message": str(e),
                                     })
 
+                    # Handle any remaining text in buffer
+                    if enable_tts and sentence_buffer.strip():
+                        try:
+                            audio_bytes = await asyncio.to_thread(
+                                generate_tts_audio, sentence_buffer.strip()
+                            )
+                            audio_base64 = base64.b64encode(audio_bytes).decode()
                             await websocket.send_json({
-                                "type": "llm_done",
-                                "full_response": full_response,
+                                "type": "audio_chunk",
+                                "audio": audio_base64,
+                                "text": sentence_buffer.strip(),
                             })
+                        except Exception as e:
+                            await websocket.send_json({
+                                "type": "tts_error",
+                                "message": str(e),
+                            })
+
+                    await websocket.send_json({
+                        "type": "llm_done",
+                        "full_response": full_response,
+                    })
 
                 except httpx.ConnectError:
                     await websocket.send_json({"type": "error", "message": "Cannot connect to Ollama"})
@@ -390,74 +360,59 @@ async def websocket_voice(websocket: WebSocket):
         ]
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                async with client.stream(
-                    "POST",
-                    f"{OLLAMA_BASE_URL}/api/chat",
-                    json={
-                        "model": OLLAMA_MODEL,
-                        "messages": messages,
-                        "stream": True,
-                    },
-                ) as response:
-                    full_response = ""
+            full_response = ""
+            sentence_buffer = ""
+
+            async for token in ollama.stream_chat(messages):
+                full_response += token
+                sentence_buffer += token
+
+                await websocket.send_json({
+                    "type": "llm_token",
+                    "token": token,
+                })
+
+                # Generate TTS for completed sentences
+                if re.search(r'[.!?]\s*$', sentence_buffer):
+                    sentence = sentence_buffer.strip()
                     sentence_buffer = ""
 
-                    async for line in response.aiter_lines():
-                        if line:
-                            chunk = json.loads(line)
-                            if "message" in chunk:
-                                token = chunk["message"].get("content", "")
-                                if token:
-                                    full_response += token
-                                    sentence_buffer += token
-
-                                    await websocket.send_json({
-                                        "type": "llm_token",
-                                        "token": token,
-                                    })
-
-                                    # Generate TTS for completed sentences
-                                    if re.search(r'[.!?]\s*$', sentence_buffer):
-                                        sentence = sentence_buffer.strip()
-                                        sentence_buffer = ""
-
-                                        if sentence:
-                                            try:
-                                                audio_bytes = await asyncio.to_thread(
-                                                    generate_tts_audio, sentence
-                                                )
-                                                audio_base64 = base64.b64encode(audio_bytes).decode()
-                                                await websocket.send_json({
-                                                    "type": "audio_chunk",
-                                                    "audio": audio_base64,
-                                                    "text": sentence,
-                                                })
-                                            except Exception as e:
-                                                await websocket.send_json({
-                                                    "type": "tts_error",
-                                                    "message": str(e),
-                                                })
-
-                    # Handle remaining text
-                    if sentence_buffer.strip():
+                    if sentence:
                         try:
                             audio_bytes = await asyncio.to_thread(
-                                generate_tts_audio, sentence_buffer.strip()
+                                generate_tts_audio, sentence
                             )
                             audio_base64 = base64.b64encode(audio_bytes).decode()
                             await websocket.send_json({
                                 "type": "audio_chunk",
                                 "audio": audio_base64,
-                                "text": sentence_buffer.strip(),
+                                "text": sentence,
                             })
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            await websocket.send_json({
+                                "type": "tts_error",
+                                "message": str(e),
+                            })
 
+            # Handle remaining text
+            if sentence_buffer.strip():
+                try:
+                    audio_bytes = await asyncio.to_thread(
+                        generate_tts_audio, sentence_buffer.strip()
+                    )
+                    audio_base64 = base64.b64encode(audio_bytes).decode()
                     await websocket.send_json({
-                        "type": "llm_done",
-                        "full_response": full_response,
+                        "type": "audio_chunk",
+                        "audio": audio_base64,
+                        "text": sentence_buffer.strip(),
                     })
+                except Exception:
+                    pass
+
+            await websocket.send_json({
+                "type": "llm_done",
+                "full_response": full_response,
+            })
 
         except httpx.ConnectError:
             try:
