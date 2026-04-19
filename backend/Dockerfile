@@ -35,7 +35,7 @@ RUN mkdir -p /app/voices && \
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json"
 
 # Copy application code
-COPY main.py music.py ./
+COPY . .
 
 ENV PIPER_MODEL=/app/voices/sv_SE-nst-medium.onnx
 ENV OLLAMA_BASE_URL=http://ollama:11434
