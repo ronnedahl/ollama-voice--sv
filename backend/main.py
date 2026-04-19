@@ -37,16 +37,12 @@ from config import (
     VAD_AGGRESSIVENESS,
     VAD_FRAME_DURATION_MS,
     VAD_SAMPLE_RATE,
-    WHISPER_COMPUTE_TYPE,
-    WHISPER_DEVICE,
     WHISPER_MODEL,
 )
 from music import MusicLibrary, detect_play_command, detect_stop_command
 from schemas import ChatRequest, ChatResponse, TranscribeResponse, TTSRequest
 from services.tts import generate_tts_audio
-
-# Lazy-loaded models
-_whisper_model = None
+from services.whisper import get_whisper_model, transcribe_audio_bytes
 
 app = FastAPI(
     title="Local Voice AI Assistant",
@@ -71,49 +67,11 @@ async def startup_event():
     music_library.scan()
 
 
-def get_whisper_model():
-    """Lazy-load Whisper model."""
-    global _whisper_model
-    if _whisper_model is None:
-        from faster_whisper import WhisperModel
-
-        print(f"Loading Whisper model '{WHISPER_MODEL}' on {WHISPER_DEVICE}...")
-        _whisper_model = WhisperModel(
-            WHISPER_MODEL,
-            device=WHISPER_DEVICE,
-            compute_type=WHISPER_COMPUTE_TYPE,
-        )
-        print("Whisper model loaded")
-    return _whisper_model
-
-
 def split_into_sentences(text: str) -> list[str]:
     """Split text into sentences for TTS streaming."""
     # Split on sentence endings, keeping the delimiter
     sentences = re.split(r'(?<=[.!?])\s+', text)
     return [s.strip() for s in sentences if s.strip()]
-
-
-def transcribe_audio_bytes(audio_bytes: bytes) -> tuple[str, float]:
-    """Transcribe audio bytes directly using Whisper."""
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
-
-    try:
-        model = get_whisper_model()
-        segments, info = model.transcribe(
-            tmp_path,
-            language=LANGUAGE,
-            beam_size=5,
-            vad_filter=True,
-        )
-
-        text_parts = [segment.text.strip() for segment in segments]
-        full_text = " ".join(text_parts)
-        return full_text, info.language_probability
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
 
 
 class AudioBuffer:
