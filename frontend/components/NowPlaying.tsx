@@ -32,10 +32,11 @@ export default function NowPlaying({ track, isPlaying, onStop }: NowPlayingProps
       </div>
       <button
         onClick={onStop}
-        className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 flex items-center justify-center transition-colors shrink-0"
-        aria-label="Stoppa"
+        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 text-sm font-medium tracking-wider transition-colors shrink-0"
+        aria-label="Stop music"
       >
         <StopIcon />
+        STOP
       </button>
     </div>
   );
