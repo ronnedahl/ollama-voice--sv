@@ -110,14 +110,14 @@ class MusicLibrary:
         return None
 
 
-# Voice command patterns (Swedish)
+# Voice command patterns (Swedish + English)
 PLAY_PATTERN = re.compile(
-    r"\b(?:spela|sätt på|kör)(?:\s+låten)?\s+(.+?)(?:\s*[.!?]|$)",
+    r"\b(?:spela|sätt på|kör|play|put on)(?:\s+(?:låten|the song))?\s+(.+?)(?:\s*[.!?]|$)",
     re.IGNORECASE,
 )
 
 STOP_PATTERN = re.compile(
-    r"\b(?:stoppa|pausa|stäng av|avsluta)\s+(?:musiken|låten|musik)",
+    r"\b(?:stoppa|pausa|stäng av|avsluta|stop|pause)\s+(?:musiken|låten|musik|the music|the song|music)",
     re.IGNORECASE,
 )
 
