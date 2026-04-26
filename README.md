@@ -7,6 +7,14 @@ A fully local voice assistant where you talk to an AI and get spoken responses �
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
+## Screenshots
+
+![Voice assistant playing music on command](docs/images/voice-assistant-recording.PNG)
+*Speaking state — Piper TTS plays back the AI's response in real time.*
+
+![Voice assistant responding with text-to-speech](docs/images/voice-assistant-playing-song.PNG)
+*The assistant detected a "play song-one" command and is now playing music locally.*
+
 ## Overview
 
 **5-stage voice pipeline:** Recording → Speech-to-Text → LLM → Text-to-Speech → Playback
