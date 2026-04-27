@@ -85,7 +85,8 @@ Environment variables (see `docker-compose.yml`):
 |-----|---------|---------|
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama host URL |
 | `OLLAMA_MODEL` | `llama3.1:8b` | LLM model name |
-| `PIPER_MODEL` | `/app/voices/en_US-amy-medium.onnx` | TTS voice model |
+| `PIPER_MODEL_EN` | `/app/voices/en_US-amy-medium.onnx` | English Piper voice model |
+| `PIPER_MODEL_SV` | `/app/voices/sv_SE-nst-medium.onnx` | Swedish Piper voice model |
 | `LANGUAGE` | `en` | `en` or `sv` — sets system prompt + expected voice language |
 | `WHISPER_MODEL` | `small` | Whisper size (`tiny`/`base`/`small`/`medium`) |
 | `MUSIC_DIR` | `/music` | Mounted music folder (change the volume in compose) |

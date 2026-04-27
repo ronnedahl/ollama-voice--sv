@@ -12,11 +12,16 @@ WHISPER_COMPUTE_TYPE = "float16"
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 
-# Piper (text-to-speech)
-PIPER_MODEL = os.getenv(
-    "PIPER_MODEL",
+# Piper (text-to-speech) — one model per supported language, picked at runtime
+PIPER_MODEL_EN = os.getenv(
+    "PIPER_MODEL_EN",
+    "/app/voices/en_US-amy-medium.onnx",
+)
+PIPER_MODEL_SV = os.getenv(
+    "PIPER_MODEL_SV",
     str(Path.home() / ".local/share/piper-voices/sv_SE-nst-medium.onnx"),
 )
+PIPER_MODELS = {"en": PIPER_MODEL_EN, "sv": PIPER_MODEL_SV}
 
 # Language + prompts
 LANGUAGE = os.getenv("LANGUAGE", "sv")
