@@ -1,10 +1,13 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useVoicePipeline, Status } from "@/hooks/useVoicePipeline";
 import { useMusicPlayer } from "@/hooks/useMusicPlayer";
+import { Language, getLanguage, setLanguage as setLanguageApi } from "@/lib/api";
 import Waveform from "@/components/Waveform";
 import StatusLabel from "@/components/StatusLabel";
 import NowPlaying from "@/components/NowPlaying";
+import LanguageToggle from "@/components/LanguageToggle";
 
 const statusToValue: Record<Status, string> = {
   idle: "READY",
@@ -18,10 +21,17 @@ const statusToValue: Record<Status, string> = {
 
 export default function Home() {
   const music = useMusicPlayer();
+  const [language, setLanguage] = useState<Language>("en");
+  const [languagePending, setLanguagePending] = useState(false);
+
+  useEffect(() => {
+    getLanguage().then(setLanguage).catch(() => {});
+  }, []);
 
   const { status, error, analyser, isRecording, startListening, handleStop } = useVoicePipeline({
     onPlaySong: (track, url) => music.play(track, url),
     onStopMusic: () => music.stop(),
+    onLanguageChanged: (lang) => setLanguage(lang),
   });
 
   const handleClick = () => {
@@ -29,11 +39,28 @@ export default function Home() {
     else if (status === "idle" || status === "error") startListening();
   };
 
+  const handleLanguageToggle = async () => {
+    const next: Language = language === "en" ? "sv" : "en";
+    setLanguagePending(true);
+    try {
+      const updated = await setLanguageApi(next);
+      setLanguage(updated);
+    } catch (e) {
+      console.error("Language switch failed:", e);
+    } finally {
+      setLanguagePending(false);
+    }
+  };
+
   return (
     <main className="relative h-dvh w-full overflow-hidden flex flex-col">
       {/* Top labels */}
       <header className="flex justify-between items-start px-6 md:px-10 pt-6 md:pt-10">
-        <StatusLabel label="Speech Language" value="English" />
+        <LanguageToggle
+          language={language}
+          onToggle={handleLanguageToggle}
+          disabled={languagePending}
+        />
         <StatusLabel label="Status" value={statusToValue[status]} align="right" />
       </header>
 

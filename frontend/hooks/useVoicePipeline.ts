@@ -1,11 +1,12 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { createVoiceStream, sendAudioChunk, stopRecording, VadState, Track } from "@/lib/api";
+import { createVoiceStream, sendAudioChunk, stopRecording, VadState, Track, Language } from "@/lib/api";
 
 interface UseVoicePipelineOptions {
   onPlaySong?: (track: Track, url: string) => void;
   onStopMusic?: () => void;
+  onLanguageChanged?: (language: Language) => void;
 }
 
 export type Status = "idle" | "listening" | "speech" | "processing" | "streaming" | "speaking" | "error";
@@ -197,6 +198,9 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
       onMusicNotFound: (query) => {
         setError(`Hittade inte: ${query}`);
         resumeListening();
+      },
+      onLanguageChanged: (lang) => {
+        options.onLanguageChanged?.(lang);
       },
     });
 
