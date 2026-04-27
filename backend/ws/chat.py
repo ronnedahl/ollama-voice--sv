@@ -7,10 +7,10 @@ import re
 import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from config import SYSTEM_PROMPT
+from config import get_system_prompt
 from services import ollama
 from services.tts import generate_tts_audio
-from state import conversation_memory
+from state import conversation_memory, language_state
 
 router = APIRouter()
 
@@ -32,7 +32,7 @@ async def websocket_chat(websocket: WebSocket):
                     await websocket.send_json({"type": "error", "message": "Text cannot be empty"})
                     continue
 
-                system_prompt = data.get("system_prompt") or SYSTEM_PROMPT
+                system_prompt = data.get("system_prompt") or get_system_prompt(language_state.get())
                 messages = [
                     {"role": "system", "content": system_prompt},
                     *conversation_memory.as_messages(),

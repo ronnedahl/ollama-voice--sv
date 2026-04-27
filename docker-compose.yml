@@ -8,7 +8,8 @@ services:
     environment:
       - OLLAMA_BASE_URL=http://localhost:11434
       - OLLAMA_MODEL=llama3.1:8b
-      - PIPER_MODEL=/app/voices/en_US-amy-medium.onnx
+      - PIPER_MODEL_EN=/app/voices/en_US-amy-medium.onnx
+      - PIPER_MODEL_SV=/app/voices/sv_SE-nst-medium.onnx
       - LANGUAGE=en
       - WHISPER_MODEL=small
       - MUSIC_DIR=/music

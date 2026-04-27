@@ -29,6 +29,8 @@ export interface Track {
 
 export const API_BASE_URL = API_BASE;
 
+export type Language = "en" | "sv";
+
 export interface VoiceStreamCallbacks {
   onVadState: (state: VadState) => void;
   onTranscript: (text: string, confidence: number) => void;
@@ -39,6 +41,7 @@ export interface VoiceStreamCallbacks {
   onPlaySong?: (track: Track, url: string) => void;
   onStopMusic?: () => void;
   onMusicNotFound?: (query: string) => void;
+  onLanguageChanged?: (language: Language) => void;
 }
 
 export function createVoiceStream(callbacks: VoiceStreamCallbacks): WebSocket {
@@ -71,6 +74,9 @@ export function createVoiceStream(callbacks: VoiceStreamCallbacks): WebSocket {
         break;
       case "music_not_found":
         callbacks.onMusicNotFound?.(data.query);
+        break;
+      case "language_changed":
+        callbacks.onLanguageChanged?.(data.language as Language);
         break;
       case "error":
       case "tts_error":
@@ -179,4 +185,25 @@ export async function textToSpeech(text: string): Promise<Blob> {
   }
 
   return response.blob();
+}
+
+export async function getLanguage(): Promise<Language> {
+  const response = await fetch(`${API_BASE}/api/language`);
+  if (!response.ok) throw new Error("Failed to fetch language");
+  const data = await response.json();
+  return data.language as Language;
+}
+
+export async function setLanguage(language: Language): Promise<Language> {
+  const response = await fetch(`${API_BASE}/api/language`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ language }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: "Failed to set language" }));
+    throw new Error(error.detail || "Failed to set language");
+  }
+  const data = await response.json();
+  return data.language as Language;
 }

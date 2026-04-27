@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from config import OLLAMA_MODEL, PIPER_MODEL, WHISPER_MODEL
+from config import OLLAMA_MODEL, PIPER_MODELS, WHISPER_MODEL
 
 router = APIRouter(tags=["health"])
 
@@ -22,5 +22,5 @@ async def health():
         "status": "healthy",
         "whisper_model": WHISPER_MODEL,
         "ollama_model": OLLAMA_MODEL,
-        "tts_model": PIPER_MODEL,
+        "tts_models": PIPER_MODELS,
     }

@@ -3,10 +3,10 @@
 import httpx
 from fastapi import APIRouter, HTTPException
 
-from config import SYSTEM_PROMPT
+from config import get_system_prompt
 from schemas import ChatRequest, ChatResponse
 from services import ollama
-from state import conversation_memory
+from state import conversation_memory, language_state
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -23,7 +23,7 @@ async def chat(request: ChatRequest):
     else:
         messages.append({
             "role": "system",
-            "content": SYSTEM_PROMPT,
+            "content": get_system_prompt(language_state.get()),
         })
 
     messages.extend(conversation_memory.as_messages())

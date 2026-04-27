@@ -12,19 +12,38 @@ WHISPER_COMPUTE_TYPE = "float16"
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 
-# Piper (text-to-speech)
-PIPER_MODEL = os.getenv(
-    "PIPER_MODEL",
+# Piper (text-to-speech) — one model per supported language, picked at runtime
+PIPER_MODEL_EN = os.getenv(
+    "PIPER_MODEL_EN",
+    "/app/voices/en_US-amy-medium.onnx",
+)
+PIPER_MODEL_SV = os.getenv(
+    "PIPER_MODEL_SV",
     str(Path.home() / ".local/share/piper-voices/sv_SE-nst-medium.onnx"),
 )
+PIPER_MODELS = {"en": PIPER_MODEL_EN, "sv": PIPER_MODEL_SV}
 
 # Language + prompts
 LANGUAGE = os.getenv("LANGUAGE", "sv")
 SYSTEM_PROMPTS = {
-    "sv": "Du är en hjälpsam svensk AI-assistent. Svara alltid på svenska om inte användaren ber om annat. Var koncis och tydlig.",
-    "en": "You are a helpful AI assistant. Always respond in English. Be concise and clear.",
+    "sv": (
+        "Du är en hjälpsam svensk AI-assistent. Du MÅSTE svara endast på svenska, "
+        "oavsett vilket språk som använts i tidigare meddelanden i den här konversationen. "
+        "Var koncis och tydlig."
+    ),
+    "en": (
+        "You are a helpful AI assistant. You MUST respond only in English, "
+        "regardless of the language used in any earlier messages in this conversation. "
+        "Be concise and clear."
+    ),
 }
-SYSTEM_PROMPT = SYSTEM_PROMPTS.get(LANGUAGE, SYSTEM_PROMPTS["sv"])
+
+
+def get_system_prompt(language: str) -> str:
+    """Return the system prompt for the given language code."""
+    if language not in SYSTEM_PROMPTS:
+        raise ValueError(f"No system prompt configured for language {language!r}")
+    return SYSTEM_PROMPTS[language]
 
 # Music
 MUSIC_DIR = os.getenv("MUSIC_DIR", str(Path.home() / "Music"))

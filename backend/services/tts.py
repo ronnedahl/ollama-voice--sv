@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from config import PIPER_MODEL
+from config import PIPER_MODELS
 
 
 def _clean_text_for_tts(text: str) -> str:
@@ -28,8 +28,11 @@ def _clean_text_for_tts(text: str) -> str:
     return text
 
 
-def generate_tts_audio(text: str) -> bytes:
+def generate_tts_audio(text: str, language: str | None = None) -> bytes:
     """Synthesize speech from text and return WAV bytes.
+
+    `language` selects the Piper voice ("en" or "sv"). If omitted, the
+    current global language state is used.
 
     Returns an empty bytes object when the input contains no word characters,
     since Piper crashes with "# channels not specified" if no audio is produced.
@@ -38,12 +41,20 @@ def generate_tts_audio(text: str) -> bytes:
     if not re.search(r"\w", cleaned):
         return b""
 
+    if language is None:
+        from state import language_state  # local import avoids circular dep at import time
+        language = language_state.get()
+
+    if language not in PIPER_MODELS:
+        raise ValueError(f"No Piper voice configured for language {language!r}")
+    model_path = PIPER_MODELS[language]
+
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         output_path = tmp.name
 
     try:
         result = subprocess.run(
-            ["piper", "--model", PIPER_MODEL, "--output_file", output_path],
+            ["piper", "--model", model_path, "--output_file", output_path],
             input=cleaned,
             capture_output=True,
             text=True,

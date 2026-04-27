@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from routes import chat as chat_route
 from routes import health as health_route
+from routes import language as language_route
 from routes import music as music_route
 from routes import transcribe as transcribe_route
 from routes import tts as tts_route
@@ -27,6 +28,7 @@ app.add_middleware(
 )
 
 app.include_router(health_route.router)
+app.include_router(language_route.router)
 app.include_router(music_route.router)
 app.include_router(transcribe_route.router)
 app.include_router(chat_route.router)

@@ -37,7 +37,8 @@ RUN mkdir -p /app/voices && \
 # Copy application code
 COPY . .
 
-ENV PIPER_MODEL=/app/voices/sv_SE-nst-medium.onnx
+ENV PIPER_MODEL_EN=/app/voices/en_US-amy-medium.onnx
+ENV PIPER_MODEL_SV=/app/voices/sv_SE-nst-medium.onnx
 ENV OLLAMA_BASE_URL=http://ollama:11434
 
 EXPOSE 8000

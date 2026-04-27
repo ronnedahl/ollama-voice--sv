@@ -3,7 +3,8 @@
 import tempfile
 from pathlib import Path
 
-from config import LANGUAGE, WHISPER_COMPUTE_TYPE, WHISPER_DEVICE, WHISPER_MODEL
+from config import WHISPER_COMPUTE_TYPE, WHISPER_DEVICE, WHISPER_MODEL
+from state import language_state
 
 _whisper_model = None
 
@@ -32,9 +33,13 @@ def transcribe_audio_bytes(audio_bytes: bytes) -> tuple[str, float]:
 
     try:
         model = get_whisper_model()
+        # Hint Whisper with the currently-configured language. Auto-detect is
+        # unreliable on short imperatives ("byt till engelska") and produces
+        # phonetic gibberish that breaks command detection. Trade-off: switch
+        # commands must be spoken in the current language.
         segments, info = model.transcribe(
             tmp_path,
-            language=LANGUAGE,
+            language=language_state.get(),
             beam_size=5,
             vad_filter=True,
         )
