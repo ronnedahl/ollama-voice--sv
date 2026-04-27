@@ -14,6 +14,12 @@ from services.tts import generate_tts_audio
 from services.vad import AudioBuffer
 from services.whisper import transcribe_audio_bytes
 from state import conversation_memory, language_state, music_library
+from voice_commands import detect_language_switch_command
+
+_LANGUAGE_CONFIRMATIONS = {
+    "sv": "Pratar svenska nu.",
+    "en": "Now speaking English.",
+}
 
 router = APIRouter()
 
@@ -67,6 +73,37 @@ async def websocket_voice(websocket: WebSocket):
             "text": text,
             "confidence": confidence,
         })
+
+        # System command: switch language (handled before music/LLM)
+        target_language = detect_language_switch_command(text)
+        if target_language:
+            language_state.set(target_language)
+            # Wipe memory so prior-language turns don't drag the LLM back into
+            # the wrong language via in-context bias.
+            conversation_memory.clear()
+            confirmation = _LANGUAGE_CONFIRMATIONS[target_language]
+            await websocket.send_json({
+                "type": "language_changed",
+                "language": target_language,
+            })
+            try:
+                audio_bytes = await asyncio.to_thread(
+                    generate_tts_audio, confirmation, target_language
+                )
+                audio_base64 = base64.b64encode(audio_bytes).decode()
+                await websocket.send_json({
+                    "type": "audio_chunk",
+                    "audio": audio_base64,
+                    "text": confirmation,
+                })
+            except Exception as e:
+                await websocket.send_json({
+                    "type": "tts_error",
+                    "message": str(e),
+                })
+            audio_buffer.reset()
+            await websocket.send_json({"type": "vad_state", "state": "listening"})
+            return
 
         # Check for music commands before invoking LLM
         if detect_stop_command(text):

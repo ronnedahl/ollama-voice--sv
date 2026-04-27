@@ -26,8 +26,16 @@ PIPER_MODELS = {"en": PIPER_MODEL_EN, "sv": PIPER_MODEL_SV}
 # Language + prompts
 LANGUAGE = os.getenv("LANGUAGE", "sv")
 SYSTEM_PROMPTS = {
-    "sv": "Du är en hjälpsam svensk AI-assistent. Svara alltid på svenska om inte användaren ber om annat. Var koncis och tydlig.",
-    "en": "You are a helpful AI assistant. Always respond in English. Be concise and clear.",
+    "sv": (
+        "Du är en hjälpsam svensk AI-assistent. Du MÅSTE svara endast på svenska, "
+        "oavsett vilket språk som använts i tidigare meddelanden i den här konversationen. "
+        "Var koncis och tydlig."
+    ),
+    "en": (
+        "You are a helpful AI assistant. You MUST respond only in English, "
+        "regardless of the language used in any earlier messages in this conversation. "
+        "Be concise and clear."
+    ),
 }
 
 
