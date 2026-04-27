@@ -35,6 +35,7 @@ Target latency: <5 seconds for the full pipeline.
 - Local music playback by voice command (`play song-one`, `stop the music`, or Swedish `spela låten …`, `stoppa musiken`)
 - Markdown stripping before TTS so the model doesn't read `**bold**` as "asterisk asterisk"
 - Swedish and English voices (switched via `LANGUAGE` env var)
+- Short-term conversation memory (last 6 turn pairs, in-process)
 
 ## Prerequisites
 
