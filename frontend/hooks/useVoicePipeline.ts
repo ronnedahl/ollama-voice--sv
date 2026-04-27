@@ -147,7 +147,6 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
     }
 
     const handleBargeIn = () => {
-      console.log("Barge-in triggered");
       stopBargeInMonitor();
       stopPlayback();
       if (wsRef.current) wsRef.current.close();
@@ -273,7 +272,6 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
       const dataArray = new Uint8Array(micAnalyserRef.current!.frequencyBinCount);
       let loudFrames = 0;
 
-      let logCounter = 0;
       const monitor = () => {
         const an = micAnalyserRef.current;
         if (!an) return;
@@ -285,15 +283,9 @@ export function useVoicePipeline(options: UseVoicePipelineOptions = {}) {
           for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
           const avg = sum / dataArray.length;
 
-          // Debug log every 30 frames (~0.5s)
-          if (++logCounter % 30 === 0) {
-            console.log(`[barge-in] status=${statusRef.current} vol=${avg.toFixed(1)} threshold=${BARGE_IN_VOLUME_THRESHOLD} loudFrames=${loudFrames}`);
-          }
-
           if (avg > BARGE_IN_VOLUME_THRESHOLD) {
             loudFrames++;
             if (loudFrames >= BARGE_IN_FRAMES_REQUIRED) {
-              console.log("[barge-in] TRIGGERED");
               handleBargeIn();
               return;
             }
