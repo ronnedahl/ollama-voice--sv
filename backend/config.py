@@ -29,7 +29,13 @@ SYSTEM_PROMPTS = {
     "sv": "Du är en hjälpsam svensk AI-assistent. Svara alltid på svenska om inte användaren ber om annat. Var koncis och tydlig.",
     "en": "You are a helpful AI assistant. Always respond in English. Be concise and clear.",
 }
-SYSTEM_PROMPT = SYSTEM_PROMPTS.get(LANGUAGE, SYSTEM_PROMPTS["sv"])
+
+
+def get_system_prompt(language: str) -> str:
+    """Return the system prompt for the given language code."""
+    if language not in SYSTEM_PROMPTS:
+        raise ValueError(f"No system prompt configured for language {language!r}")
+    return SYSTEM_PROMPTS[language]
 
 # Music
 MUSIC_DIR = os.getenv("MUSIC_DIR", str(Path.home() / "Music"))

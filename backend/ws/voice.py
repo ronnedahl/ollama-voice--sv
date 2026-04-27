@@ -7,13 +7,13 @@ import re
 import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from config import SYSTEM_PROMPT
+from config import get_system_prompt
 from music import detect_play_command, detect_stop_command
 from services import ollama
 from services.tts import generate_tts_audio
 from services.vad import AudioBuffer
 from services.whisper import transcribe_audio_bytes
-from state import conversation_memory, music_library
+from state import conversation_memory, language_state, music_library
 
 router = APIRouter()
 
@@ -93,7 +93,7 @@ async def websocket_voice(websocket: WebSocket):
 
         # LLM + TTS streaming (with last 6 turn-pair memory)
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": get_system_prompt(language_state.get())},
             *conversation_memory.as_messages(),
             {"role": "user", "content": text},
         ]
