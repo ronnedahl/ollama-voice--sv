@@ -10,6 +10,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from config import SYSTEM_PROMPT
 from services import ollama
 from services.tts import generate_tts_audio
+from state import conversation_memory
 
 router = APIRouter()
 
@@ -34,6 +35,7 @@ async def websocket_chat(websocket: WebSocket):
                 system_prompt = data.get("system_prompt") or SYSTEM_PROMPT
                 messages = [
                     {"role": "system", "content": system_prompt},
+                    *conversation_memory.as_messages(),
                     {"role": "user", "content": text},
                 ]
 
@@ -87,6 +89,8 @@ async def websocket_chat(websocket: WebSocket):
                                 "type": "tts_error",
                                 "message": str(e),
                             })
+
+                    conversation_memory.add_turn(text, full_response)
 
                     await websocket.send_json({
                         "type": "llm_done",

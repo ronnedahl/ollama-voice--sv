@@ -13,7 +13,7 @@ from services import ollama
 from services.tts import generate_tts_audio
 from services.vad import AudioBuffer
 from services.whisper import transcribe_audio_bytes
-from state import music_library
+from state import conversation_memory, music_library
 
 router = APIRouter()
 
@@ -91,9 +91,10 @@ async def websocket_voice(websocket: WebSocket):
             audio_buffer.reset()
             return
 
-        # LLM + TTS streaming
+        # LLM + TTS streaming (with last 6 turn-pair memory)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
+            *conversation_memory.as_messages(),
             {"role": "user", "content": text},
         ]
 
@@ -144,6 +145,8 @@ async def websocket_voice(websocket: WebSocket):
                     })
                 except Exception:
                     pass
+
+            conversation_memory.add_turn(text, full_response)
 
             await websocket.send_json({
                 "type": "llm_done",

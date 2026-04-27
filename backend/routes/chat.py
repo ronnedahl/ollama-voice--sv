@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from config import SYSTEM_PROMPT
 from schemas import ChatRequest, ChatResponse
 from services import ollama
+from state import conversation_memory
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -25,12 +26,14 @@ async def chat(request: ChatRequest):
             "content": SYSTEM_PROMPT,
         })
 
+    messages.extend(conversation_memory.as_messages())
     messages.append({"role": "user", "content": request.text})
 
     try:
         ai_response = await ollama.chat(messages)
         if not ai_response:
             raise HTTPException(status_code=500, detail="Empty response from Ollama")
+        conversation_memory.add_turn(request.text, ai_response)
         return ChatResponse(response=ai_response)
 
     except httpx.ConnectError:
